@@ -1,0 +1,415 @@
+<!-- /index.html -->
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>社交媒体商品分析</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --bg:#0f172a; --card:#111827; --text:#e5e7eb; --muted:#9ca3af; --accent:#22c55e; --border:#1f2937;}
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei"; background: var(--bg); color: var(--text); }
+    header { padding: 24px; text-align: center; }
+    header h1 { margin: 0 0 8px; font-size: 22px; }
+    header p { margin:0; color: var(--muted); font-size: 14px; }
+    main { max-width: 1000px; margin: 0 auto; padding: 20px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    label { display:block; margin-bottom:8px; font-size:14px; color: var(--muted); }
+    input[type="text"], input[type="file"] { width:100%; padding:10px; border-radius:8px; border:1px solid var(--border); background:#0b1220; color:var(--text); }
+    .row { display:flex; gap:12px; flex-wrap:wrap; }
+    .row > div { flex:1 1 280px; }
+    button { background: var(--accent); color:#062; border:none; padding:10px 16px; border-radius:8px; font-weight:600; cursor:pointer; }
+    button:disabled { opacity:.5; cursor:not-allowed; }
+    .muted { color: var(--muted); font-size:13px; }
+    .kv { display:grid; grid-template-columns: 160px 1fr; gap:8px; }
+    .bar { height:10px; background:#0b1220; border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+    .bar > span { display:block; height:100%; background: var(--accent); }
+    a { color:#93c5fd; text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    pre { white-space:pre-wrap; word-break:break-word; }
+    #geo-map { width:100%; height:420px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+</head>
+<body>
+  <header>
+    <h1>社交媒体商品分析</h1>
+    <p>上传图片与关键词，获取社媒消息、趋势（地区/价格/销量）与测评摘要</p>
+  </header>
+
+  <main>
+    <div class="card">
+      <form id="analyze-form">
+        <div class="row">
+          <div>
+            <label>关键词（品牌/型号/别名）</label>
+            <input type="text" name="keyword" id="keyword" placeholder="例如：Sony A7C II" required>
+          </div>
+          <div>
+            <label>商品图片（可选）</label>
+            <input type="file" name="image" id="image" accept="image/*">
+          </div>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+          <button id="submit-btn" type="submit">开始分析</button>
+          <span class="muted" id="status"></span>
+        </div>
+      </form>
+    </div>
+
+    <div id="result" style="display:none;">
+      <div class="card">
+        <h3 style="margin-top:0;">总体概览</h3>
+        <div class="kv">
+          <div>关键词</div><div id="r-keyword"></div>
+          <div>数据源数量</div><div id="r-sources"></div>
+          <div>价格统计</div><div id="r-price"></div>
+          <div>销量相关提及</div><div id="r-sales"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">舆情趋势（按天）</h3>
+        <div id="r-volume"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">地区热力</h3>
+        <div id="geo-map"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">情感分布</h3>
+        <div class="kv">
+          <div>正向</div><div class="bar"><span id="r-pos" style="width:0%"></span></div>
+          <div>中性</div><div class="bar"><span id="r-neutral" style="width:0%"></span></div>
+          <div>负向</div><div class="bar"><span id="r-neg" style="width:0%"></span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">方面级测评</h3>
+        <div id="r-aspects"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">中文报告</h3>
+        <div id="r-report" style="white-space:pre-wrap;"></div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0;">示例帖子</h3>
+        <div id="r-samples"></div>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const form = document.getElementById('analyze-form');
+    const statusEl = document.getElementById('status');
+    const submitBtn = document.getElementById('submit-btn');
+    const resultEl = document.getElementById('result');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusEl.textContent = '正在分析…';
+      submitBtn.disabled = true;
+      resultEl.style.display = 'none';
+
+      const fd = new FormData(form);
+      const keyword = fd.get('keyword');
+      try {
+        const posts = await searchAll(keyword);
+        const data = analyzePosts(posts, keyword);
+        renderResult(data);
+        statusEl.textContent = '分析完成';
+        resultEl.style.display = 'block';
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = '请求失败，请稍后重试';
+      } finally {
+        submitBtn.disabled = false;
+      }
+    });
+
+    async function searchAll(keyword) {
+      const reddit = await searchReddit(keyword);
+      return reddit;
+    }
+
+    async function tryFetch(url, options={}) {
+      try {
+        const r = await fetch(url, options);
+        if (!r.ok) throw new Error('status '+r.status);
+        return await r.json();
+      } catch {
+        const proxy = 'https://r.jina.ai/http/'+url;
+        const rp = await fetch(proxy);
+        const text = await rp.text();
+        return JSON.parse(text);
+      }
+    }
+
+    async function searchReddit(keyword, limit=30) {
+      const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(keyword)}&limit=${limit}&sort=new`;
+      const data = await tryFetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      const items = [];
+      for (const child of (data?.data?.children || [])) {
+        const d = child.data || {};
+        items.push({
+          source: 'reddit',
+          id: d.id,
+          title: d.title,
+          text: d.selftext || '',
+          author: d.author,
+          url: `https://reddit.com${d.permalink || ''}`,
+          created_at: d.created_utc ? new Date(d.created_utc * 1000).toISOString() : ''
+        });
+      }
+      return items;
+    }
+
+    const PRICE_RE = /([$€¥£])\s?(\d{1,3}(?:[,\d]{0,3})*(?:\.\d{1,2})?)/ig;
+    const SALE_WORDS = /\b(sold|销量|sale|销量破|热销|售出)\b/i;
+
+    function extractPrices(text) {
+      const out = [];
+      const t = String(text||'');
+      let m;
+      while ((m = PRICE_RE.exec(t)) !== null) {
+        const v = parseFloat(m[2].replace(/,/g,''));
+        if (!isNaN(v)) out.push({ currency: m[1], value: v });
+      }
+      return out;
+    }
+
+    function detectSales(text) {
+      return SALE_WORDS.test(String(text||''));
+    }
+
+    function sentimentSimple(text) {
+      const t = String(text||'').toLowerCase();
+      const posWords = ['good','great','love','不错','喜欢','满意','推荐','划算'];
+      const negWords = ['bad','hate','terrible','差','不满意','坑','贵','劣质'];
+      let pos=0, neg=0;
+      for (const w of posWords) if (t.includes(w)) pos++;
+      for (const w of negWords) if (t.includes(w)) neg++;
+      return pos>neg ? 'positive' : (neg>pos ? 'negative' : 'neutral');
+    }
+
+    let COUNTRY_MAP = null;
+    async function ensureCountries() {
+      if (COUNTRY_MAP) return;
+      const r = await fetch('https://fastly.jsdelivr.net/npm/world-countries@4/countries.json');
+      const arr = await r.json();
+      const map = {};
+      for (const c of arr) {
+        const name = (c.name?.common||'').toLowerCase();
+        if (name) map[name] = c.name.common;
+        const cca2 = (c.cca2||'').toLowerCase();
+        const cca3 = (c.cca3||'').toLowerCase();
+        if (cca2) map[cca2] = c.name.common;
+        if (cca3) map[cca3] = c.name.common;
+      }
+      COUNTRY_MAP = map;
+    }
+
+    function extractCountries(text) {
+      const t = String(text||'').toLowerCase();
+      const out = new Set();
+      if (!COUNTRY_MAP) return [];
+      for (const k of Object.keys(COUNTRY_MAP)) {
+        if (k && t.includes(k)) out.add(COUNTRY_MAP[k]);
+      }
+      return Array.from(out);
+    }
+
+    function aspectAnalyze(text) {
+      const t = String(text||'').toLowerCase();
+      const aspects = {
+        '质量': { pos: ['quality','durable','做工好','稳定','靠谱'], neg: ['poor','fragile','做工差','不稳定','翻车'] },
+        '价格': { pos: ['cheap','便宜','划算','性价比高'], neg: ['expensive','贵','涨价','不值'] },
+        '外观': { pos: ['design','漂亮','好看','美观'], neg: ['丑','设计差','难看'] },
+        '电池': { pos: ['battery life','续航长','省电'], neg: ['battery drain','续航差','耗电'] },
+        '售后': { pos: ['support','售后好','客服好'], neg: ['售后差','客服差','维修难'] }
+      };
+      const result = {};
+      for (const k of Object.keys(aspects)) {
+        const v = aspects[k];
+        let p=0, n=0;
+        for (const w of v.pos) if (t.includes(w)) p++;
+        for (const w of v.neg) if (t.includes(w)) n++;
+        if (p||n) result[k] = { positive: p, negative: n };
+      }
+      return result;
+    }
+
+    function analyzePosts(posts, keyword) {
+      const times = {};
+      const prices = [];
+      const sentiments = { positive:0, neutral:0, negative:0 };
+      let sales_mentions = 0;
+      const country_counts = {};
+      const aspects_agg = {};
+      posts.forEach(p => {
+        const t = `${p.text||''} ${p.title||''}`;
+        const d = p.created_at||'';
+        const day = d ? String(d).slice(0,10) : '';
+        if (day) times[day] = (times[day]||0)+1;
+        for (const pr of extractPrices(t)) prices.push(pr);
+        sentiments[sentimentSimple(t)]++;
+        if (detectSales(t)) sales_mentions++;
+        for (const c of extractCountries(t)) country_counts[c] = (country_counts[c]||0)+1;
+        const asp = aspectAnalyze(t);
+        for (const k of Object.keys(asp)) {
+          aspects_agg[k] = aspects_agg[k] || { positive:0, negative:0 };
+          aspects_agg[k].positive += asp[k].positive;
+          aspects_agg[k].negative += asp[k].negative;
+        }
+      });
+      const vals = prices.map(x=>x.value);
+      const price_stats = {
+        count: vals.length,
+        min: vals.length? Math.min(...vals): null,
+        max: vals.length? Math.max(...vals): null,
+        avg: vals.length? vals.reduce((a,b)=>a+b,0)/vals.length: null,
+        currencies: Array.from(new Set(prices.map(x=>x.currency))).sort()
+      };
+      const sources = { reddit: posts.length, youtube: 0, twitter: 0, instagram: 0, tiktok: 0, pinterest: 0 };
+      return {
+        keyword,
+        image: null,
+        sources_count: sources,
+        analysis: { volume_by_day: times, sentiment: sentiments, price_stats, sales_mentions },
+        geo: { country_counts },
+        aspects: aspects_agg,
+        report_zh: buildReportZh(keyword, { sentiment: sentiments, price_stats, country_counts, aspects: aspects_agg, sales_mentions }, sources),
+        samples: posts.slice(0, 12)
+      };
+    }
+
+    function buildReportZh(keyword, analysis, sources) {
+      const total = (analysis.sentiment.positive||0)+(analysis.sentiment.neutral||0)+(analysis.sentiment.negative||0);
+      const pos = analysis.sentiment.positive||0;
+      const neu = analysis.sentiment.neutral||0;
+      const neg = analysis.sentiment.negative||0;
+      const price = analysis.price_stats||{};
+      const cc = analysis.country_counts||{};
+      const top = Object.entries(cc).sort((a,b)=>b[1]-a[1]).slice(0,5);
+      const asp = analysis.aspects||{};
+      const lines = [];
+      lines.push(`主题：${keyword}`);
+      lines.push(`覆盖平台：Reddit ${sources.reddit||0}，YouTube ${sources.youtube||0}，Twitter ${sources.twitter||0}，Instagram ${sources.instagram||0}，TikTok ${sources.tiktok||0}，Pinterest ${sources.pinterest||0}`);
+      lines.push(`情感分布：正向 ${pos}，中性 ${neu}，负向 ${neg}，总样本 ${total}`);
+      if (price.count) lines.push(`价格概览：均价 ${Number(price.avg).toFixed(2)}，最低 ${Number(price.min).toFixed(2)}，最高 ${Number(price.max).toFixed(2)}，币种 ${(price.currencies||[]).join('/')}`);
+      else lines.push('价格概览：暂未识别到价格信息');
+      if (top.length) lines.push('地区热度（Top5）：'+top.map(([k,v])=>`${k} ${v}`).join('；'));
+      if (Object.keys(asp).length) lines.push('方面评价：'+Object.entries(asp).map(([k,v])=>`${k} 正向${v.positive||0} 负向${v.negative||0}`).join('；'));
+      lines.push(`销量相关提及：${analysis.sales_mentions||0} 次`);
+      lines.push('建议：结合高热度地区进行投放与测评内容优化，关注负面集中方面进行针对性改进。');
+      return lines.join('\n');
+    }
+
+    function renderResult(data) {
+      document.getElementById('r-keyword').textContent = data.keyword;
+      const sc = data.sources_count || {};
+      document.getElementById('r-sources').textContent = `Reddit: ${sc.reddit || 0}，YouTube: ${sc.youtube || 0}，Twitter: ${sc.twitter || 0}，Instagram: ${sc.instagram || 0}，TikTok: ${sc.tiktok || 0}，Pinterest: ${sc.pinterest || 0}`;
+
+      const ps = data.analysis?.price_stats || {};
+      const priceLine = ps.count ? `样本数 ${ps.count}；均价 ${fmt(ps.avg)}；最低 ${fmt(ps.min)}；最高 ${fmt(ps.max)}；币种 ${ps.currencies?.join(' / ') || '-'}` : '未识别到价格信息';
+      document.getElementById('r-price').textContent = priceLine;
+
+      document.getElementById('r-sales').textContent = `${data.analysis?.sales_mentions || 0} 次提及销量/售出相关词`;
+
+      const vol = data.analysis?.volume_by_day || {};
+      const volEl = document.getElementById('r-volume');
+      volEl.innerHTML = '';
+      const days = Object.keys(vol).sort();
+      if (!days.length) {
+        volEl.textContent = '暂无数据';
+      } else {
+        days.forEach(d => {
+          const count = vol[d];
+          const row = document.createElement('div');
+          row.className = 'kv';
+          const dt = document.createElement('div'); dt.textContent = d;
+          const barWrap = document.createElement('div'); barWrap.className = 'bar';
+          const bar = document.createElement('span'); bar.style.width = `${Math.min(100, count * 10)}%`;
+          barWrap.appendChild(bar);
+          row.appendChild(dt); row.appendChild(barWrap);
+          volEl.appendChild(row);
+        });
+      }
+
+      const sent = data.analysis?.sentiment || {positive:0,neutral:0,negative:0};
+      const total = (sent.positive||0)+(sent.neutral||0)+(sent.negative||0);
+      setBar('r-pos', pct(sent.positive, total));
+      setBar('r-neutral', pct(sent.neutral, total));
+      setBar('r-neg', pct(sent.negative, total));
+
+      drawGeoMap(data.geo?.country_counts || {});
+      renderAspects(data.aspects || {});
+      document.getElementById('r-report').textContent = data.report_zh || '';
+
+      const samplesEl = document.getElementById('r-samples');
+      samplesEl.innerHTML = '';
+      (data.samples || []).forEach(s => {
+        const div = document.createElement('div');
+        div.style.marginBottom = '10px';
+        const a = document.createElement('a');
+        a.href = s.url; a.target = '_blank';
+        a.textContent = `[${s.source}] ${s.title || '(无标题)'}`;
+        const meta = document.createElement('div');
+        meta.className = 'muted';
+        meta.textContent = `${s.author || '未知作者'} · ${s.created_at || ''}`;
+        const text = document.createElement('pre'); text.textContent = s.text || '';
+        div.appendChild(a); div.appendChild(meta); div.appendChild(text);
+        samplesEl.appendChild(div);
+      });
+    }
+
+    function drawGeoMap(counts) {
+      const el = document.getElementById('geo-map');
+      const chart = echarts.init(el);
+      fetch('https://fastly.jsdelivr.net/npm/echarts-map/json/world.json')
+        .then(r => r.json())
+        .then(geo => {
+          echarts.registerMap('world', geo);
+          const data = Object.keys(counts).map(k => ({ name: k, value: counts[k] }));
+          chart.setOption({
+            backgroundColor: 'transparent',
+            tooltip: { trigger: 'item' },
+            visualMap: { min: 0, max: Math.max(1, Math.max(...data.map(d=>d.value), 1)), left: 10, bottom: 10, text: ['高','低'], calculable: true, inRange: { color: ['#0b1220','#22c55e'] } },
+            series: [{ name: '提及量', type: 'map', map: 'world', roam: true, label: { show: false }, data }]
+          });
+        })
+        .catch(() => { el.innerHTML = '<span class="muted">地图加载失败</span>'; });
+    }
+
+    function renderAspects(aspects) {
+      const el = document.getElementById('r-aspects');
+      el.innerHTML = '';
+      const names = Object.keys(aspects);
+      if (!names.length) { el.textContent = '暂无数据'; return; }
+      names.forEach(name => {
+        const a = aspects[name] || {};
+        const total = (a.positive||0)+(a.negative||0);
+        const wrap = document.createElement('div');
+        wrap.className = 'kv';
+        const label = document.createElement('div'); label.textContent = name;
+        const barWrap = document.createElement('div'); barWrap.className = 'bar';
+        const posBar = document.createElement('span'); posBar.style.width = `${pct(a.positive, total)}%`;
+        barWrap.appendChild(posBar);
+        wrap.appendChild(label); wrap.appendChild(barWrap);
+        el.appendChild(wrap);
+      });
+    }
+
+    function pct(n, total) { return total ? Math.round(n*100/total) : 0; }
+    function setBar(id, p) { document.getElementById(id).style.width = `${p}%`; }
+    function fmt(v) { return v==null ? '-' : Number(v).toFixed(2); }
+
+    ensureCountries();
+  </script>
+</body>
+</html>
